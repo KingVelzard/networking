@@ -15,6 +15,8 @@
 #include <arpa/inet.h>
 #include <sys/wait.h>
 #include <signal.h>
+#include "thread_pool.h"
+
 
 #define PORT "3490" // the port the users will be connecting to
 #define BACKLOG 10 // how many pending connections
@@ -50,6 +52,9 @@ int main(void)
 	int yes=1;
 	char s[INET6_ADDRSTRLEN];
 	int rv;
+	thread_pool::ThreadPool my_pool{
+		static_cast<size_t>(std::thread::hardware_concurrency()
+	)};
 
 	memset(&hints, 0, sizeof hints);
 	hints.ai_family = AF_INET;
@@ -123,14 +128,16 @@ int main(void)
 				s, INET6_ADDRSTRLEN);
 		printf("server: got connection from %s\n", s);
 
-		if (!fork()) { // this is the child process
-			close(listen_sockfd); // child doesn't need the listener
-			if (send(recv_sockfd, "Hello, world!", 13, 0) == -1)
-				perror("send");
-			close(recv_sockfd);
-			exit(0);
-		}
-		close(recv_sockfd);
+		my_pool.push({ // this delegates send to threads
+			thread_pool::TaskType::Execute, // Execute
+			[recv_sockfd](const std::vector<int>&)
+			{
+				if (send(recv_sockfd, "Hello, world!", 13, 0) == -1)
+					perror("send");
+				close(recv_sockfd);
+			},
+			{recv_sockfd}
+		});
 	}
 
 	return 0;
