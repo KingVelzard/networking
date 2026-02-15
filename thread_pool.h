@@ -8,6 +8,7 @@
 #include <condition_variable>
 #include <queue>
 #include "safe_queue.h"
+#include "joined_thread.h"
 
 namespace thread_pool
 {
@@ -25,7 +26,7 @@ namespace thread_pool
 	{
 		private:
 			TsQueue<Task> _queue;
-			std::vector<std::jthread> _threads;
+			std::vector<velThread::joined_thread> _threads;
 		public:
 		explicit ThreadPool(std::size_t n_threads);
 		virtual ~ThreadPool();

@@ -42,6 +42,123 @@ void* get_in_addr(struct sockaddr *sa)
 	return &(((struct sockaddr_in6*)sa)->sin6_addr);
 }
 
+void add_to_pfds(struct pollfd **pfds, int newfd, int *fd_count,
+		int *fd_size)
+{
+	// If we don't have room, add more space in the pfds array
+	if (*fd_count == *fd_size) {
+		*fd_size *= 2; // Double it
+		*pfds = realloc(*pfds, sizeof(**pfds) * (*fd_size));
+	}
+
+	(*pfds)[*fd_count].fd = newfd;
+	(*pfds)[*fd_count].events = POLLIN; // Check ready-to-read
+	(*pfds)[*fd_count].revents = 0;
+
+	(*fd_count)++;
+}
+
+
+void del_from_pfds(struct pollfd pfds[], int i, int *fd_count)
+{
+	// copy the one from the end over this one
+	pfds[i] = pfds[*fd_count - 1]
+	
+		(*fd_count)--;
+}
+
+void handle_new_connection(int listener, int *fd_count,
+		int *fd)size, struct pollfd **pfds)
+{
+	struct sockaddr_storage remoteaddr; // Client address
+	socklen_t addrlen;
+	int newfd; // newly accepted sockfd
+	char remoteIP[INET6_ADDRSTRLEN];
+	addrlen = sizeof remoteaddr;
+	newfd = accept(listen_sockfd, (struct sockaddr*)&remoteaddr,
+			&addrlen);
+
+	if (newfd == -1) {
+		perror("accept");
+	} else {
+		add_to_pfds(pfds, newfd, fd_count, fd_size);
+
+		printf("pollserver: new connection from %s on socket %d\n".
+				inetntop2($remoteaddr, remoteIP, sizeof remoteIP),
+				newfd);
+		}
+}
+
+void handle_client_data(int listen_sockfd, int *fd_count,
+		struct pollfd *pfds, int *pfd_i)
+{
+	char buf[256];	// buffer for client data
+	
+	int nbytes = recv(pfd_i[*pfd_i].fd, buf, sizeof buf, 0);
+
+	int sender_fd = pfds[*pfd_i].fd;
+
+	const char* response =
+        	"HTTP/1.1 200 OK\r\n"
+                "Content-Length: 13\r\n"
+                "Connection: close\r\n"
+                "\r\n"
+                "Hello, world!";
+
+	if (nbytes <= 0) { // Got error or connection closed
+		if (nbytes == 0) {
+			printf("pollserver: socket %d hung up \n", sender_fd);
+			
+		} else {
+			perror("recv");
+		}
+		
+		close(pfds[*pfd_i].fd); 
+
+		del_from_pfds(pfds, *pfd_i, fd_count);
+
+		// reexamine slot we just deleted
+		//
+		(*pfd_i)--;
+	} else { // We got good data from client
+		printf("pollserver: recv from fd %d: %.*s", sender_fd, nbytes, buf);
+
+		for (int j{0}; j < *fd_count; ++j) {
+			int dest_fd = pfds[j].fd;
+
+			// except the listener and sender
+			if (dest_fd != listen_sockfd && dest_fd != sender_fd) {
+				if (send(dest_fd, response, sizeof response, 0) == -1) {
+					perror("send");
+				}
+			}
+		}
+	}
+}
+
+
+void process_connections(int listen_sockfd, int *fd_count, int *fd_size,
+		struct pollfd *pfds)
+{
+	for (int i{0}; i < *fd_count; ++i)
+	{
+		// Check if someone's ready to send
+		if ((*pfds)[i].revents & (POLLIN | POLLHUP)) {
+			// We have an event!!
+
+			if ((*pfds)[i].fd == listen_sockfd)
+			{
+				// if its the listener, new connection
+				handle_new_connection(listen_sockfd, fd_count, fd_size,
+							pfds);
+			} else {
+				// otherwise it's a regular client request
+				handle_client_data(listener, fd_count, *pfds, &i);
+			}
+		}
+	}
+}
+
 int main(void)
 {
 	int listen_sockfd, recv_sockfd;
@@ -61,6 +178,11 @@ int main(void)
 	hints.ai_socktype = SOCK_STREAM;
 	hints.ai_flags = AI_PASSIVE; // use my ip
 	
+	// polling inits
+	int fd_size = 100;
+	int fd_count = 0;
+	struct pollfd *pfds = malloc(sizeof *pfds * fd_size);	
+
 	if ((rv = getaddrinfo(NULL, PORT, &hints, &servinfo)) != 0) {
 		fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(rv));
 	}
@@ -109,36 +231,24 @@ int main(void)
 		perror("sigaction");
 		exit(1);
 	}
-
+	
+	pfds[0].fd = listen_sockfd;
+	pfds[0].events = POLLIN;
 	printf("server: waiting for connections...\n");
 
 
 
 	while (1) { // main accept loop
-		sin_size = sizeof their_addr;
-		recv_sockfd = accept(listen_sockfd, (struct sockaddr*)&their_addr,
-				&sin_size);
-		if (recv_sockfd == -1) {
-			perror("accept");
-			continue;
+		int poll_count = poll(pfds, fd_count, -1);
+
+		if (poll_count == -1) {
+			perror("poll");
+			exit(1);
 		}
 
-		inet_ntop(their_addr.ss_family, 
-				get_in_addr((struct sockaddr*)&their_addr),
-				s, INET6_ADDRSTRLEN);
-		printf("server: got connection from %s\n", s);
-
-		my_pool.push({ // this delegates send to threads
-			thread_pool::TaskType::Execute, // Execute
-			[recv_sockfd](const std::vector<int>&)
-			{
-				if (send(recv_sockfd, "Hello, world!", 13, 0) == -1)
-					perror("send");
-				close(recv_sockfd);
-			},
-			{recv_sockfd}
-		});
+		process_connections(listen_sockfd, &fd_count, &fd_size, &pfds);
 	}
-
+	
+	free(pfds);
 	return 0;
 }

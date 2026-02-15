@@ -18,7 +18,7 @@ namespace
 	 */
 	auto make_thread_handler(thread_pool::TsQueue<thread_pool::Task>& _queue) 
 	{
-		return std::jthread{
+		return velThread::joined_thread{
 			[&_queue]{
 				while (true)
 				{
