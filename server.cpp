@@ -16,10 +16,40 @@
 #include <sys/wait.h>
 #include <signal.h>
 #include "thread_pool.h"
-
+#include <poll.h>
+#include <fcntl.h>
+#include <sys/epoll.h>
 
 #define PORT "3490" // the port the users will be connecting to
-#define BACKLOG 10 // how many pending connections
+#define BACKLOG 1024 // how many pending connections
+
+/*
+ * Convert socket to IP address string
+ * addrL struct sockaddr_in or struct sockaddr_in6
+ */
+const char * inet_ntop2(void *addr, char *buf, size_t size)
+{
+    struct sockaddr_storage *sas = static_cast<sockaddr_storage*>(addr);
+    struct sockaddr_in *sa4;
+    struct sockaddr_in6 *sa6;
+    void* src;
+
+    switch(sas->ss_family) {
+        case AF_INET:
+            sa4 = (struct sockaddr_in*)addr;
+            src = &(sa4->sin_addr);
+            break;
+        case AF_INET6:
+            sa6 = (struct sockaddr_in6*)addr;
+            src = &(sa6->sin6_addr);
+            break;
+        default:
+            return NULL;
+    }
+
+    return inet_ntop(sas->ss_family, src, buf, size);
+}
+
 
 void sigchld_handler(int s)
 {
@@ -48,7 +78,8 @@ void add_to_pfds(struct pollfd **pfds, int newfd, int *fd_count,
 	// If we don't have room, add more space in the pfds array
 	if (*fd_count == *fd_size) {
 		*fd_size *= 2; // Double it
-		*pfds = realloc(*pfds, sizeof(**pfds) * (*fd_size));
+		*pfds = static_cast<struct pollfd*>(
+                realloc(*pfds, sizeof(**pfds) * (*fd_size)));
 	}
 
 	(*pfds)[*fd_count].fd = newfd;
@@ -62,13 +93,13 @@ void add_to_pfds(struct pollfd **pfds, int newfd, int *fd_count,
 void del_from_pfds(struct pollfd pfds[], int i, int *fd_count)
 {
 	// copy the one from the end over this one
-	pfds[i] = pfds[*fd_count - 1]
+	pfds[i] = pfds[*fd_count - 1];
 	
-		(*fd_count)--;
+	(*fd_count)--;
 }
 
-void handle_new_connection(int listener, int *fd_count,
-		int *fd)size, struct pollfd **pfds)
+void handle_new_connection(int listen_sockfd, int *fd_count,
+		int *fd_size, struct pollfd **pfds)
 {
 	struct sockaddr_storage remoteaddr; // Client address
 	socklen_t addrlen;
@@ -77,14 +108,16 @@ void handle_new_connection(int listener, int *fd_count,
 	addrlen = sizeof remoteaddr;
 	newfd = accept(listen_sockfd, (struct sockaddr*)&remoteaddr,
 			&addrlen);
+    int flags = fcntl(newfd, F_GETFL, 0);
+    fcntl(newfd, F_SETFL, flags | O_NONBLOCK);
 
 	if (newfd == -1) {
 		perror("accept");
 	} else {
 		add_to_pfds(pfds, newfd, fd_count, fd_size);
 
-		printf("pollserver: new connection from %s on socket %d\n".
-				inetntop2($remoteaddr, remoteIP, sizeof remoteIP),
+		printf("pollserver: new connection from %s on socket %d\n",
+				inet_ntop2(&remoteaddr, remoteIP, sizeof remoteIP),
 				newfd);
 		}
 }
@@ -94,14 +127,14 @@ void handle_client_data(int listen_sockfd, int *fd_count,
 {
 	char buf[256];	// buffer for client data
 	
-	int nbytes = recv(pfd_i[*pfd_i].fd, buf, sizeof buf, 0);
+	int nbytes = recv(pfds[*pfd_i].fd, buf, sizeof buf, 0);
 
 	int sender_fd = pfds[*pfd_i].fd;
 
 	const char* response =
         	"HTTP/1.1 200 OK\r\n"
                 "Content-Length: 13\r\n"
-                "Connection: close\r\n"
+                "Connection: keep-alive\r\n"
                 "\r\n"
                 "Hello, world!";
 
@@ -110,10 +143,10 @@ void handle_client_data(int listen_sockfd, int *fd_count,
 			printf("pollserver: socket %d hung up \n", sender_fd);
 			
 		} else {
-			perror("recv");
+            perror("recv");
 		}
 		
-		close(pfds[*pfd_i].fd); 
+        close(pfds[*pfd_i].fd); 
 
 		del_from_pfds(pfds, *pfd_i, fd_count);
 
@@ -121,24 +154,17 @@ void handle_client_data(int listen_sockfd, int *fd_count,
 		//
 		(*pfd_i)--;
 	} else { // We got good data from client
-		printf("pollserver: recv from fd %d: %.*s", sender_fd, nbytes, buf);
-
-		for (int j{0}; j < *fd_count; ++j) {
-			int dest_fd = pfds[j].fd;
-
-			// except the listener and sender
-			if (dest_fd != listen_sockfd && dest_fd != sender_fd) {
-				if (send(dest_fd, response, sizeof response, 0) == -1) {
-					perror("send");
-				}
-			}
+				
+        if (send(sender_fd, response, strlen(response), 0) == -1) {
+			perror("send");
 		}
 	}
+		
 }
 
 
 void process_connections(int listen_sockfd, int *fd_count, int *fd_size,
-		struct pollfd *pfds)
+		struct pollfd **pfds)
 {
 	for (int i{0}; i < *fd_count; ++i)
 	{
@@ -153,7 +179,7 @@ void process_connections(int listen_sockfd, int *fd_count, int *fd_size,
 							pfds);
 			} else {
 				// otherwise it's a regular client request
-				handle_client_data(listener, fd_count, *pfds, &i);
+				handle_client_data(listen_sockfd, fd_count, *pfds, &i);
 			}
 		}
 	}
@@ -180,8 +206,9 @@ int main(void)
 	
 	// polling inits
 	int fd_size = 100;
-	int fd_count = 0;
-	struct pollfd *pfds = malloc(sizeof *pfds * fd_size);	
+	int fd_count = 1;
+	struct pollfd *pfds = static_cast<struct pollfd*>(
+            malloc(sizeof *pfds * fd_size));	
 
 	if ((rv = getaddrinfo(NULL, PORT, &hints, &servinfo)) != 0) {
 		fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(rv));
@@ -189,7 +216,7 @@ int main(void)
 	
 	// loop through all the results and bind to the first we can
 	
-	for (p = servinfo; p != NULL; p->ai_next) {
+	for (p = servinfo; p != NULL; p = p->ai_next) {
 		if ((listen_sockfd = socket(p->ai_family, p->ai_socktype,
 						p->ai_protocol)) == -1) {
 			perror("server : socket");
